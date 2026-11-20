@@ -235,6 +235,8 @@ def _present(game, lo, real):
         buf = game.screen
         game.screen = real
         real.blit(pygame.transform.smoothscale(buf, real.get_size()), (0, 0))
+    else:
+        game.screen = real          # 防止 game.screen 停在离屏层上
     pygame.display.flip()
 
 
@@ -613,9 +615,12 @@ def main():
         # 非高清页面（设置 / 按键 / 联机 / 成绩等）仍按 960×540 设计稿排版：
         # 重定向到离屏层绘制，再整体放大贴回 1920 画布，坐标与热区都不用改
         _lo_used = game.state != "play" and game.state not in HI_STATES
-        _lo_real = game.screen
-        if _lo_used:
-            game.screen = _lo_layer(_lo_real)
+        # 画布尺寸永远以真实显示面为准：点击可能在本帧中途换页（联机页→天空
+        # 二级页），上一帧结束时 game.screen 还停在 960 离屏层；如果直接拿它
+        # 当"真实画布"，此后每帧都会画在离屏层上、翻的还是旧的高清表面 ——
+        # 表现就是"点返回没反应，画面一直停在联机页"。
+        _lo_real = pygame.display.get_surface() or game.screen
+        game.screen = _lo_layer(_lo_real) if _lo_used else _lo_real
 
 
         # 菜单音乐控制
