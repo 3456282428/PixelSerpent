@@ -119,28 +119,51 @@ class Bridge:
         # 让 main.py 里的 pygame 调用直接落到桥接层
         pygame.mouse.get_pos = self.get_pos
         pygame.display.flip = self.flip
+        # 先把窗口藏起来：Panda3D 建的是 1920x1080 的居中大窗，ursina 之后
+        # 才缩到 960x540，中间还会被 center_on_screen / SW_RESTORE 来回挪。
+        # 全部藏起来、等第一帧渲染时再摆到右下角并显示，用户就看不到这些跳动
+        import time as _time
+        for _ in range(24):
+            h = self._own_hwnd(require_visible=False)
+            if h:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.ShowWindow(h, 0)      # SW_HIDE
+                except Exception:
+                    pass
+                break
+            _time.sleep(0.05)
 
     # ---------- 显示 ----------
     def create_display(self, size, caption=None):
         """main.create_display 的替身：只建离屏表面，不碰真实窗口"""
+        # 此刻窗口肯定已经存在，再摆一次（__init__ 那次可能因为还没映射而落空）
+        self._place_window(self._own_hwnd())
         return pygame.display.set_mode((int(size[0]), int(size[1])), 0)
 
     def get_pos(self):
         return self.mpos
 
-    def _own_hwnd(self):
-        """按本进程 PID + 可见 + 客户区够大，找我们自己的窗口句柄（带缓存）"""
+    def _own_hwnd(self, require_visible=True):
+        """按本进程 PID + 客户区够大，找我们自己的窗口句柄（带缓存）
+
+        require_visible=False 时连还没映射出来的窗口也算，用来在窗口
+        第一次显示之前就把位置摆好。
+        """
         cached = getattr(self, "_hwnd_cache", None)
         if cached:
             try:
                 import ctypes
-                if ctypes.windll.user32.IsWindow(cached):
+                import time as _t
+                if (ctypes.windll.user32.IsWindow(cached)
+                        and _t.time() - getattr(self, "_hwnd_t", 0) < 0.4):
                     return cached
             except Exception:
                 pass
             self._hwnd_cache = None
         try:
             import ctypes
+            import time as _t
             from ctypes import wintypes
             u = ctypes.windll.user32
             pid = os.getpid()
@@ -150,17 +173,24 @@ class Bridge:
             def cb(hwnd, _):
                 p = wintypes.DWORD()
                 u.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
-                if p.value != pid or not u.IsWindowVisible(hwnd):
+                if p.value != pid:
+                    return True
+                if require_visible and not u.IsWindowVisible(hwnd):
                     return True
                 r = wintypes.RECT()
                 u.GetClientRect(hwnd, ctypes.byref(r))
-                if r.right - r.left >= 320 and r.bottom - r.top >= 240:
-                    found.append(hwnd)
-                    return False
+                cw, ch = r.right - r.left, r.bottom - r.top
+                if cw >= 320 and ch >= 240:
+                    # 尺寸越接近 960x540 越可能是真正在用的那个窗口：
+                    # Panda3D resize 时会新建一个窗口再销毁旧的，只认第一个
+                    # 会一直对着已经废弃的句柄摆位置
+                    found.append((abs(cw - W) + abs(ch - H), hwnd))
                 return True
 
             u.EnumWindows(cb, 0)
-            self._hwnd_cache = found[0] if found else None
+            found.sort()
+            self._hwnd_cache = found[0][1] if found else None
+            self._hwnd_t = _t.time()
             return self._hwnd_cache
         except Exception:
             return None
@@ -508,6 +538,9 @@ class Bridge:
             u.SetFocus(hwnd)
             if attached:
                 u.AttachThreadInput(tid, fg_tid, False)
+            # ShowWindow(SW_RESTORE) 会把窗口送回系统记的"还原矩形"（就是
+            # ursina 建窗时的居中位置），恢复完要立刻摆回右下角
+            self._place_window(hwnd)
             ok = u.GetForegroundWindow() == hwnd
             if not silent:
                 print("[SHELL] focus hwnd=%s attached=%s ok=%s"
@@ -577,37 +610,60 @@ class Bridge:
         用户在聊天窗口里看反馈时，游戏窗口被压在下面：画面还在动，点击却
         落在上层窗口上，所有按钮"点了没反应"。固定摆到右侧空白处 + 置顶，
         就能避开这种遮挡。
+
+        已经在目标位置就直接返回（不打印、不计数）；位置被 ursina 的
+        setOrigin / 全屏切换 / 系统层叠挪走了才重新摆回去。这样窗口从
+        出现到稳定只动一次，不会再"中间 ↔ 右下"来回跳。
         """
         n = getattr(self, "_placed_n", 0)
-        if n >= getattr(self, "_place_limit", 3) or not hwnd:
-            return
-        self._placed_n = n + 1
+        if n >= getattr(self, "_place_limit", 999) or not hwnd:
+            return False
+        if os.environ.get("SHELL_NO_PLACE"):
+            return False
+        if getattr(self, "_full", False):
+            return False                     # 全屏时不要动窗口
         try:
             import ctypes
             from ctypes import wintypes
             u = ctypes.windll.user32
-            r = wintypes.RECT()
-            u.GetClientRect(hwnd, ctypes.byref(r))
-            cw, ch = r.right, r.bottom
-            if cw < 320 or ch < 240:
-                return
+            # 用户正在按着左键（多半是在拖窗口），这时候别跟他抢
+            if u.GetAsyncKeyState(0x01) & 0x8000:
+                return False
             sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+            # 目标窗口尺寸固定：960x540 客户区 + 边框（不读 GetWindowRect，
+            # 免得在 ursina resize 前后读到 1920x1080 那种中间态）
+            tw, th = W + 16, H + 39
+            x = max(0, sw - tw - 20)
+            y = max(0, sh - th - 70)
             wr = wintypes.RECT()
             u.GetWindowRect(hwnd, ctypes.byref(wr))
-            ww, wh = wr.right - wr.left, wr.bottom - wr.top
-            x = max(0, sw - ww - 20)
-            y = max(0, sh - wh - 70)
+            cur_w, cur_h = wr.right - wr.left, wr.bottom - wr.top
+            if (abs(wr.left - x) <= 2 and abs(wr.top - y) <= 2
+                    and abs(cur_w - tw) <= 4 and abs(cur_h - th) <= 4):
+                return True                  # 已经就位
+            self._placed_n = n + 1
             ok = u.SetWindowPos(wintypes.HWND(hwnd), ctypes.c_void_p(-1),
-                                int(x), int(y), ww, wh, 0x0040)
+                                int(x), int(y), tw, th, 0x0040)
             if not ok:
-                u.MoveWindow(hwnd, int(x), int(y), ww, wh, True)
+                u.MoveWindow(hwnd, int(x), int(y), tw, th, True)
+            # 同步 Panda3D 内部的 origin：否则它下一次 requestProperties
+            # （窗口 resize / 切全屏）时会按旧 origin 把窗口拽回屏幕中间
+            try:
+                application.base.win.set_origin(int(x), int(y))
+            except Exception:
+                try:
+                    application.base.win.setOrigin(int(x), int(y))
+                except Exception:
+                    pass
             rr = wintypes.RECT()
             u.GetWindowRect(hwnd, ctypes.byref(rr))
-            print("[SHELL] placed=%s at %s,%s (%dx%d client %dx%d screen %dx%d) now=%s"
-                  % (ok, x, y, ww, wh, cw, ch, sw, sh,
+            print("[SHELL] placed=%s at %s,%s (%dx%d was %dx%d screen %dx%d) now=%s"
+                  % (ok, x, y, tw, th, cur_w, cur_h, sw, sh,
                      (rr.left, rr.top, rr.right, rr.bottom)), flush=True)
+            return True
         except Exception as exc:
             print("[SHELL] place failed %r" % (exc,), flush=True)
+            return False
 
     def flip(self):
         surf = pygame.display.get_surface()
@@ -618,6 +674,10 @@ class Bridge:
         self._drain()
         self._sync_mouse()
         self._frames += 1
+        if self._frames in (1, 2, 3):
+            # 第一帧就把藏起来的窗口摆到右下角并显示（SetWindowPos 带
+            # SWP_SHOWWINDOW，位置对了才让它露脸）
+            self._place_window(self._own_hwnd(require_visible=False))
         if os.environ.get("SHELL_PERF"):
             import time
             now = time.perf_counter()
@@ -633,8 +693,6 @@ class Bridge:
         self._maybe_click()
         self._maybe_key()
         self._maybe_shot()
-        if self._frames in (3, 40, 120):
-            self._place_window(self._own_hwnd())
         if self._frames in (3, 20, 40, 80, 120):
             self._grab_focus()
         # 2D 菜单每秒抽查几次：光标在窗口里却丢了前台时补回来并刷新指针，
@@ -642,6 +700,7 @@ class Bridge:
         if self._frames % 4 == 0:
             hwnd = self._own_hwnd()
             if hwnd:
+                self._place_window(hwnd)      # 位置被挪走就拉回右下角
                 self.keep_menu_focus(hwnd)
 
     def _maybe_click(self):
