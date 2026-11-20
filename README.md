@@ -1,6 +1,6 @@
 # 像素贪吃蛇 · PixelSerpent
 
-一个用 Python 写的贪吃蛇合集：2D 网格版（经典单人 / AI 演示 / 人机对战 / 双人联机）与 3D 空中版（Ursina + Panda3D，含人机与联机对战）。全部界面统一 1920×1080 画布，中文界面，鼠标 + 键盘双操作。
+一个用 Python 写的贪吃蛇合集：2D 网格版（经典单人 / AI 演示 / 人机对战 / 双人联机）与 3D 空中版（Ursina + Panda3D，含人机与联机对战）。菜单与首页走 1920×1080 高清画布，游戏内用 960×540 逻辑分辨率再等比放大，中文界面，鼠标 + 键盘双操作。
 
 ## 玩法一览
 
@@ -18,28 +18,35 @@
 ## 环境
 
 - Python 3.10+（开发环境为 3.13.9）
-- `pip install -r requirements.txt`（pygame、Pillow、numpy）
-- 3D 模式另需 `pip install ursina panda3d`
+- `pip install -r requirements.txt`（pygame、Pillow、numpy、pyperclip，覆盖全部 2D 模式）
+- 3D 模式另需 `pip install ursina panda3d`（开发环境 ursina 8.3.0 / Panda3D 1.10.16）
+- 打包 exe 另需 `pip install pyinstaller`
 
 ## 运行
 
 ```bash
-python main.py                          # 2D 主程序（首页菜单）
+python app_shell.py                     # 推荐：带窗口居中/F11 全屏/可缩放，也是 exe 的入口
+python main.py                          # 纯 2D 主程序（首页菜单）
 python sky3d_mode.py                    # 单独运行 3D 天空贪吃蛇
 set SKY3D_TEST=1 && python sky3d_mode.py # 3D 离屏自检（Windows）
 ```
 
-操作：方向键 / WASD 移动，P 暂停，ESC 菜单；3D 模式鼠标控制转向、左键冲刺、右键释放道具。
+`app_shell.py` 在 `main.py` 之上补了窗口体验：启动即屏幕居中，标题栏可拖动，拖窗口边角可等比缩放（画面 letterbox 留黑，按钮命中自动换算），F11 一键全屏 / 还原。
+
+操作：方向键 / WASD 移动，P 暂停，ESC 菜单 / 返回上一级；3D 模式鼠标控制转向、左键冲刺、右键释放道具；F11 全屏。
 
 ## 目录
 
 ```
+app_shell.py                                 exe 入口：2D 离屏渲染 + 3D 同进程桥接、窗口居中/缩放/F11
 main.py / config.py / utils.py / ui.py      入口、配置、工具、UI 组件
 game.py / ai_mode.py / versus_mode.py       2D 单人、AI 演示、人机对战
 netbattle_mode.py / network.py              2D 联机与 TCP 协议
 sky3d_mode.py / sky3d_ai_mode.py            3D 主模块与 3D 人机
 sky3d_net_mode.py                           3D 联机（HP 制）
 home_bg.py / home_scene.py / menu_art.py    首页背景与菜单底图
+tests/test_steer.py                         3D 转向逻辑的单元测试
+像素贪吃蛇.spec                              PyInstaller 打包配置
 assets/                                     图片、音效、字体、帧序列
 data/                                       运行时存档（首次运行自动创建）
 docs/                                       项目说明、结构文档、AI 使用声明
@@ -57,6 +64,8 @@ docs/                                       项目说明、结构文档、AI 使
 
 - 联机未做断线重连与 NAT 穿透，仅适用于局域网。
 - 3D 模式依赖 OpenGL，虚拟机或远程桌面下可能无法创建窗口。
+- 高清菜单页每帧需把整张 1920×1080 画面上传为纹理，菜单页实际帧率约 11–16 fps；进入游戏后走 960×540 低清路径，不受此影响。
+- 窗口缩放为等比 letterbox，画面比例固定 16:9，不会为超高/超宽窗口重排 UI。
 
 ## 版权声明
 
