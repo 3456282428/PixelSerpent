@@ -331,22 +331,29 @@ _GRID_CACHE = {}
 _GRID_KEY = (1, 2, 3)   # 透明色键（不会与网格/背景颜色冲突）
 
 
-def get_grid_overlay(width, height, grid_size, color):
+def get_grid_overlay(width, height, grid_size, color, line_w=None):
     """预渲染网格线为透明叠加层，替代每帧逐条 draw.line。
 
     使用 colorkey 透明 + RLEACCEL，比逐条画线和逐像素 alpha 更快，
     像素结果与直接画线完全一致。
+
+    line_w 默认按画布尺寸自动取：大画布（1920）画 2px。因为游戏是把 1920
+    画布缩小到 960×540 显示，1px 的线缩放后只有半像素，采样点落在半像素
+    边界上会让线条出现"有的粗有的细、间距忽大忽小"的摩尔纹；画成 2px 后
+    缩到 1px 才是稳定的一条实线。
     """
     import pygame
-    key = (width, height, grid_size, color)
+    if line_w is None:
+        line_w = 2 if width >= 1600 else 1
+    key = (width, height, grid_size, color, line_w)
     surf = _GRID_CACHE.get(key)
     if surf is None:
         surf = pygame.Surface((width, height))
         surf.fill(_GRID_KEY)
         for x in range(0, width, grid_size):
-            pygame.draw.line(surf, color, (x, 0), (x, height), 1)
+            pygame.draw.line(surf, color, (x, 0), (x, height), line_w)
         for y in range(0, height, grid_size):
-            pygame.draw.line(surf, color, (0, y), (width, y), 1)
+            pygame.draw.line(surf, color, (0, y), (width, y), line_w)
         surf.set_colorkey(_GRID_KEY, pygame.RLEACCEL)
         _GRID_CACHE[key] = surf
     return surf

@@ -53,7 +53,7 @@ for _pkg in ('ursina', 'panda3d', 'pandac'):
 hiddenimports += ['sky3d_mode', 'sky3d_net_mode', 'sky3d_ai_mode']
 
 a = Analysis(
-    ['main.py'],
+    ['app_shell.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,

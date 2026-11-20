@@ -173,6 +173,20 @@ class _RawMouse:
             u.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
             u.ShowCursor.argtypes = [ctypes.c_bool]
             u.ShowCursor.restype = ctypes.c_int
+            u.IsWindow.argtypes = [wintypes.HWND]
+            u.IsWindowVisible.argtypes = [wintypes.HWND]
+            u.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            u.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+            class _CURSORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD),
+                            ("flags", wintypes.DWORD),
+                            ("hCursor", wintypes.HANDLE),
+                            ("ptScreenPos", wintypes.POINT)]
+            u.GetCursorInfo.argtypes = [ctypes.POINTER(_CURSORINFO)]
+            u.GetCursorInfo.restype = wintypes.BOOL
+            self._ci_cls = _CURSORINFO
             self._ct, self._wt, self._u = ctypes, wintypes, u
             self.ok = True
         except Exception:
@@ -180,23 +194,53 @@ class _RawMouse:
         self._cursor_hidden = False
 
     # ---- 系统光标显隐（ShowCursor 是线程级引用计数，进程退出自动失效）----
+    def _cursor_showing(self):
+        """系统当前是否真的在画光标（GetCursorInfo 的 CURSOR_SHOWING 位）
+
+        ShowCursor 只改线程计数，而 Panda3D 的 set_cursor_hidden 在 Windows
+        上也是调 ShowCursor：ursina 的 mouse.visible 与这里的 hide_cursor
+        各减一次，进游戏时计数就被压到 -2 以下，退出时按"调一次就够"的思路
+        加回来只到 -1，系统仍判定隐藏 —— 这正是暂停菜单里只剩面板、看不到
+        指针的原因。所以不再猜计数，直接读系统状态校验。
+        """
+        cls = getattr(self, "_ci_cls", None)
+        if cls is None:
+            return None
+        try:
+            ci = cls()
+            ci.cbSize = self._ct.sizeof(cls)
+            if not self._u.GetCursorInfo(self._ct.byref(ci)):
+                return None
+            return bool(ci.flags & 0x00000001)
+        except Exception:
+            return None
+
+    def _apply_cursor(self, visible):
+        """反复调 ShowCursor，直到系统真实状态与目标一致（最多 16 次）"""
+        for _ in range(16):
+            showing = self._cursor_showing()
+            if showing is None:              # 查询失败：退回按计数调用一次
+                self._u.ShowCursor(bool(visible))
+                return
+            if showing == bool(visible):
+                return
+            self._u.ShowCursor(bool(visible))
+
     def hide_cursor(self):
-        if not self.ok or self._cursor_hidden:
+        if not self.ok:
             return
         try:
-            while self._u.ShowCursor(False) >= 0:
-                pass                       # 计数归到 <0 才算真的隐藏
+            self._apply_cursor(False)
             self._cursor_hidden = True
         except Exception:
             pass
 
     def show_cursor(self):
-        if not self.ok or not self._cursor_hidden:
+        if not self.ok:
             return
         try:
-            while self._u.ShowCursor(True) < 0:
-                pass                       # 回到 >=0 才算真的可见
-            self._cursor_hidden = False
+            self._apply_cursor(True)         # 不因标志位已回 False 而跳过：
+            self._cursor_hidden = False      # 标志与实际系统状态可能已经脱节
         except Exception:
             pass
 
@@ -240,14 +284,56 @@ class _RawMouse:
 
     def _window(self):
         if self.hwnd:
-            return self.hwnd
+            try:
+                if self._u.IsWindow(self.hwnd):
+                    return self.hwnd
+            except Exception:
+                pass
+            self.hwnd = None
         if not self.ok:
             return None
-        try:
+        try:                             # 1) 单人模式：标题固定，按标题直查
             self.hwnd = self._u.FindWindowW(None, self.TITLE) or None
+            if self.hwnd:
+                return self.hwnd
         except Exception:
             self.hwnd = None
+        self.hwnd = self._find_own_window()    # 2) 标题带后缀：按进程找窗口
         return self.hwnd
+
+    def _find_own_window(self):
+        """枚举本进程的顶层可见窗口，不依赖窗口标题。
+
+        人机对战 / 联机对战的窗口标题是「天空贪吃蛇 3D 人机对战」这类带
+        后缀的名字，而 FindWindowW 是精确匹配：查不到窗口 → _client_box()
+        拿不到客户区 → read() 每帧都返回 0 位移 → 这两个模式完全无法转向。
+        这里改成「本进程 + 可见 + 客户区够大」，标题怎么改都不受影响。
+        """
+        try:
+            pid = self._ct.windll.kernel32.GetCurrentProcessId()
+            proto = self._ct.WINFUNCTYPE(self._wt.BOOL, self._wt.HWND,
+                                         self._wt.LPARAM)
+            found = []
+
+            def _cb(hwnd, _lparam):
+                try:
+                    p = self._wt.DWORD()
+                    self._u.GetWindowThreadProcessId(hwnd, self._ct.byref(p))
+                    if p.value != pid or not self._u.IsWindowVisible(hwnd):
+                        return True
+                    r = self._wt.RECT()
+                    if (self._u.GetClientRect(hwnd, self._ct.byref(r))
+                            and (r.right - r.left) >= 320
+                            and (r.bottom - r.top) >= 240):
+                        found.append(hwnd)
+                except Exception:
+                    pass
+                return True
+
+            self._u.EnumWindows(proto(_cb), 0)
+            return found[0] if found else None
+        except Exception:
+            return None
 
     def _client_box(self):
         """客户区在桌面上的矩形：左上角 x/y 与宽高（物理像素）"""
@@ -339,6 +425,15 @@ class _RawMouse:
         self.show_cursor()
         self.restore_accel()
         self.prev = None
+        # lock() 把指针钉在客户区正中，暂停面板也在正中；这里再显式落一次
+        # 中心点，保证指针一定在窗口内、面板上方，而不是停在旧的屏幕边缘。
+        box = self._client_box()
+        if box is not None:
+            ox, oy, cw, ch = box
+            try:
+                self._u.SetCursorPos(ox + cw // 2, oy + ch // 2)
+            except Exception:
+                pass
 
 
 # ---------------- 程序化纹理 ----------------
@@ -2482,10 +2577,7 @@ class Sky3DGame(Entity):
         self._update_energy_hud(0.0)
         self._update_buff_hud()
         if self.bgm and not self.test_mode:
-            try:
-                self.bgm.play()
-            except Exception:
-                pass
+            self._set_bgm_paused(False)     # 新开局也从断点/正常倍速起播，别停在 0 倍速
 
     def _set_cursor_locked(self, locked):
         """游戏中隐藏光标，退出时恢复。
@@ -2545,7 +2637,7 @@ class Sky3DGame(Entity):
         self.death_reason = reason
         if self.bgm:
             try:
-                self.bgm.stop()
+                self.bgm.stop(destroy=False)   # 只停播、不销毁：重开一局还能再用同一个对象
             except Exception:
                 pass
         self._play(self.snd_death)
@@ -3631,10 +3723,13 @@ class Sky3DGame(Entity):
                                 "退出游戏", "确定要退出游戏吗？",
                                 lambda: self._exit(EXIT_QUIT_GAME), "退出游戏")))
         y = 0.045
+        self.pause_btns = []
+        self._pause_sel = 0
         for text, col, cb in pause_items:
-            Button(parent=self.pause_card, text=text, position=(0, y),
-                   scale=(0.28, 0.064), color=color.rgba(*col), z=-0.02,
-                   on_click=cb)
+            btn = Button(parent=self.pause_card, text=text, position=(0, y),
+                         scale=(0.28, 0.064), color=color.rgba(*col), z=-0.02,
+                         on_click=cb)
+            self.pause_btns.append((btn, col))
             y -= 0.074
         self._apply_menu_font(self.pause_panel)
 
@@ -3680,10 +3775,13 @@ class Sky3DGame(Entity):
                                "退出游戏", "确定要退出游戏吗？",
                                lambda: self._exit(EXIT_QUIT_GAME), "退出游戏")))
         y = 0.0
+        self.over_btns = []
+        self._over_sel = 0
         for text, col, cb in over_items:
-            Button(parent=self.over_card, text=text, position=(0, y),
-                   scale=(0.28, 0.064), color=color.rgba(*col), z=-0.02,
-                   on_click=cb)
+            btn = Button(parent=self.over_card, text=text, position=(0, y),
+                         scale=(0.28, 0.064), color=color.rgba(*col), z=-0.02,
+                         on_click=cb)
+            self.over_btns.append((btn, col))
             y -= 0.082
         Text(parent=self.over_card, text="ESC 返回菜单" if not net_mode
              else "ESC 离开对战", position=(0, y - 0.005), origin=(0, 0),
@@ -3806,17 +3904,32 @@ class Sky3DGame(Entity):
         self.dialog_info.text = info
         self.dialog_yes.text = confirm_text
         self._dialog_action = action
+        # 弹层打开期间，把底下的暂停 / 结算面板整个禁用，避免底层按钮抢走鼠标射线
+        self._dialog_parent = "pause" if self.pause_menu else ("over" if self.over else None)
+        if self._dialog_parent == "pause":
+            self.pause_panel.enabled = False
+        elif self._dialog_parent == "over":
+            self.over_panel.enabled = False
         self.dialog_panel.enabled = True
         self._pop_menu(self.dialog_card, self.dialog_dim)
+
+    def _restore_dialog_parent(self):
+        if getattr(self, "_dialog_parent", None) == "pause":
+            self.pause_panel.enabled = True
+        elif self._dialog_parent == "over":
+            self.over_panel.enabled = True
+        self._dialog_parent = None
 
     def _close_dialog(self):
         self.dialog_panel.enabled = False
         self._dialog_action = None
+        self._restore_dialog_parent()
 
     def _confirm_dialog(self):
         action = self._dialog_action
         self.dialog_panel.enabled = False
         self._dialog_action = None
+        self._restore_dialog_parent()
         if action is not None:
             action()
 
@@ -3835,6 +3948,35 @@ class Sky3DGame(Entity):
         card.scale = (0.94, 0.94, 1)
         card.animate_scale((1, 1, 1), duration=0.18, curve=curve.out_back)
 
+    def _menu_highlight(self, btns, idx):
+        """键盘选中项高亮：加亮底色 + 轻微放大（鼠标仍可直接点）"""
+        if not btns:
+            return 0
+        idx %= len(btns)
+        for i, (b, col) in enumerate(btns):
+            if i == idx:
+                b.color = color.rgba(min(1.0, col[0] + 0.35), min(1.0, col[1] + 0.35),
+                                     min(1.0, col[2] + 0.35), col[3])
+                b.scale = (0.31, 0.072)
+            else:
+                b.color = color.rgba(*col)
+                b.scale = (0.28, 0.064)
+        return idx
+
+    def _menu_key(self, key, btns, idx):
+        """方向键上下移动选中，回车/空格执行 —— 鼠标失灵时的键盘通路"""
+        if not btns:
+            return idx
+        if key in ("down arrow", "tab"):
+            idx = self._menu_highlight(btns, idx + 1)
+        elif key == "up arrow":
+            idx = self._menu_highlight(btns, idx - 1)
+        elif key in ("enter", "return", "space"):
+            cb = getattr(btns[idx][0], "on_click", None)
+            if callable(cb):
+                cb()
+        return idx
+
     def _hide_menus(self):
         self.pause_panel.enabled = False
         self.over_panel.enabled = False
@@ -3843,6 +3985,7 @@ class Sky3DGame(Entity):
         if settings_panel is not None:
             settings_panel.enabled = False
         self._dialog_action = None
+        self._dialog_parent = None
         # 关菜单后恢复游戏内鼠标锁定（光标隐藏 + 居中，转向不受屏幕边缘限制）
 
     def _show_gameover(self):
@@ -3856,6 +3999,30 @@ class Sky3DGame(Entity):
         self.over_panel.enabled = True
         self.pause_badge.enabled = False
         self._pop_menu(self.over_card, self.over_dim)
+        self._over_sel = self._menu_highlight(getattr(self, "over_btns", []), 0)
+
+    def _set_bgm_paused(self, paused):
+        """暂停 / 恢复背景音乐（三个模式共用）。
+
+        不能用 Audio.play() 来"恢复"：ursina 的 Audio.pause() 实现是
+        「记下播放进度 → 把 pitch 置 0 → stop」，pitch=0 等于 0 倍速播放，
+        声音仍在走但完全听不到 —— 这就是关掉暂停菜单后 BGM 消失的原因。
+        Audio.resume() 会还原 pitch / 音量 / 声道并从断点续播。
+        """
+        if self.bgm is None or self.test_mode:
+            return
+        try:
+            if paused:
+                self.bgm.pause()
+                return
+            if getattr(self.bgm, "temp_time", None) is not None:
+                self.bgm.resume()
+                if getattr(self.bgm, "playing", 0):
+                    return
+            self.bgm.pitch = 1.0          # 兜底：clip 重载失败时也不留在 0 倍速
+            self.bgm.play()
+        except Exception:
+            pass
 
     def _open_pause_menu(self):
         self.pause_menu = True
@@ -3864,12 +4031,9 @@ class Sky3DGame(Entity):
         self._set_hud_visible(False)
         self.pause_panel.enabled = True
         self._pop_menu(self.pause_card, self.pause_dim)
+        self._pause_sel = self._menu_highlight(getattr(self, "pause_btns", []), 0)
         self._set_cursor_locked(False)
-        if self.bgm:
-            try:
-                self.bgm.pause()
-            except Exception:
-                pass
+        self._set_bgm_paused(True)
 
     def _update_hud_text(self):
         self.hud_lv.text = f"Lv {self.level}   经验 {self.xp}   最高 {self.best}"
@@ -3914,11 +4078,8 @@ class Sky3DGame(Entity):
         self._set_hud_visible(True)
         self._hide_menus()
         self._set_cursor_locked(True)
-        if self.bgm and not self.test_mode and not self.over:
-            try:
-                self.bgm.play()
-            except Exception:
-                pass
+        if not self.over:
+            self._set_bgm_paused(False)
 
     def _exit(self, code):
         self._record_best()
@@ -3937,6 +4098,8 @@ class Sky3DGame(Entity):
         if self.dialog_panel.enabled:
             if key == "escape":
                 self._close_dialog()
+            elif key in ("enter", "return", "space"):
+                self._confirm_dialog()      # 键盘也能确认，鼠标失灵时不至于卡死
             return
         if self.over:
             if key == "escape":
@@ -3946,6 +4109,9 @@ class Sky3DGame(Entity):
                 else:
                     self._ask_dialog("返回菜单", "当前进度将不会保存",
                                      lambda: self._exit(0), "返回菜单")
+            else:
+                self._over_sel = self._menu_key(key, getattr(self, "over_btns", []),
+                                                self._over_sel)
             return
         if key == "p":
             if self.pause_menu:
@@ -3953,11 +4119,10 @@ class Sky3DGame(Entity):
             else:
                 self.paused = not self.paused
                 self.pause_badge.enabled = self.paused
-                if self.bgm:
-                    try:
-                        self.bgm.pause() if self.paused else self.bgm.play()
-                    except Exception:
-                        pass
+                # P 暂停同样要放开光标：旧版只切徽标，鼠标仍被隐藏钉在中心，
+                # 玩家看着"已暂停"却找不到指针。继续游戏时再锁定回中。
+                self._set_cursor_locked(not self.paused)
+                self._set_bgm_paused(self.paused)
             return
         if key == "escape":
             sp = getattr(self, "settings_panel", None)
@@ -3969,6 +4134,9 @@ class Sky3DGame(Entity):
                 self._open_pause_menu()
             return
         if self.paused or self.pause_menu:
+            if self.pause_menu:      # 暂停菜单支持方向键 + 回车
+                self._pause_sel = self._menu_key(key, getattr(self, "pause_btns", []),
+                                                 self._pause_sel)
             return
         if key == "scroll up":
             self.cam_dist = max(9, self.cam_dist - 2.0)

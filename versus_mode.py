@@ -244,6 +244,10 @@ class VersusGame:
 
     def _ai_choose_direction(self):
         head = self.ai_logic[0]
+        # 头已经越界（刚撞墙，本帧还没判定死亡）：直接保持当前方向，别再去
+        # 做 BFS —— 越界坐标写进障碍矩阵会直接 IndexError 崩掉游戏
+        if not (0 <= head[0] < self.grid_w and 0 <= head[1] < self.grid_h):
+            return self.ai_dir
         player_head = self.player_logic[0] if self.player_logic else None
 
         # 找最近食物
@@ -346,11 +350,14 @@ class VersusGame:
         obstacle = self._bfs_obstacle
         visited = self._bfs_visited
         for seg in self.ai_body:
-            obstacle[seg[0], seg[1]] = True
+            if 0 <= seg[0] < self.grid_w and 0 <= seg[1] < self.grid_h:
+                obstacle[seg[0], seg[1]] = True
         for seg in self.player_full:
-            obstacle[seg[0], seg[1]] = True
+            if 0 <= seg[0] < self.grid_w and 0 <= seg[1] < self.grid_h:
+                obstacle[seg[0], seg[1]] = True
         for seg in self.obstacles:
-            obstacle[seg[0], seg[1]] = True
+            if 0 <= seg[0] < self.grid_w and 0 <= seg[1] < self.grid_h:
+                obstacle[seg[0], seg[1]] = True
 
         queue = [(start, [start])]
         visited[start[0], start[1]] = True

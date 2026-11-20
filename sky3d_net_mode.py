@@ -1036,7 +1036,7 @@ class Sky3DNetGame(Sky3DGame):
         self.guard_t = 0.0
         if self.bgm:
             try:
-                self.bgm.stop()
+                self.bgm.stop(destroy=False)   # 只停播、不销毁：重开一局还能复用
             except Exception:
                 pass
         self._play(self.snd_death)

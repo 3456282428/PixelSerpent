@@ -1041,12 +1041,13 @@ def main():
             elif mode == "ai":
                 if not ai_game.handle_event(event):
                     mode = "single"
-                    game.state = "menu"
+                    # 经典贪吃蛇是从二级菜单进来的，返回时回二级菜单而不是主菜单
+                    game.state = "menu_classic"
 
             elif mode == "versus":
                 if not versus_game.handle_event(event):
                     mode = "single"
-                    game.state = "menu"
+                    game.state = "menu_classic"
                     os.environ['SDL_VIDEO_WINDOW_POS'] = "center"
                     _switch_hi(False)
                     game.screen = pygame.display.get_surface()

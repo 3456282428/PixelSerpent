@@ -1571,6 +1571,9 @@ class Sky3DAIGame(Sky3DGame):
     def _exit(self, code):
         # 人机对战经验不计入 3D 单机最高分
         save_settings()
+        rm = getattr(self, "raw_mouse", None)
+        if rm is not None:
+            rm.unlock()      # 恢复系统光标 + 还原指针加速（覆写父类 _exit 时别漏掉）
         os._exit(code)
 
 
