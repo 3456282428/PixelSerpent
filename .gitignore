@@ -1,0 +1,30 @@
+# 虚拟环境与构建产物
+venv/
+build_old/
+build/
+dist/
+__pycache__/
+*.py[cod]
+
+# 编辑器与工具配置
+.idea/
+.embeddedskills/
+
+# 运行时数据（含昵称、战绩等个人信息）
+data/
+logs/
+
+# 过程材料与大体积素材
+docs/screenshots/
+assets/source/
+assets/menu_video_frames/
+assets/_archive/
+
+# 字体：授权不允许再分发
+assets/fonts/
+
+# 其他
+*.log
+*.spec.bak
+Thumbs.db
+desktop.ini
